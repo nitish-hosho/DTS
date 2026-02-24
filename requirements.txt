@@ -1,0 +1,24 @@
+# Deep Thinking Score (DTS) — dependencies
+# Core ML / numerical
+torch>=2.1.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Data
+pandas>=2.0.0
+openpyxl>=3.1.0           # read .xlsx golden-dataset files
+
+# Embeddings & retrieval
+sentence-transformers>=2.6.0
+
+# LLM / quantisation
+transformers>=4.40.0
+accelerate>=0.29.0
+bitsandbytes>=0.43.0       # NF4 4-bit quantisation
+
+# API service
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+httpx>=0.27.0              # async HTTP client (optional, for testing)
