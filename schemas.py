@@ -48,6 +48,11 @@ class ScoreRequest(BaseModel):
         description="If true, include per-layer JSD distances for every token in the "
                     "response. Useful for debugging; increases payload size.",
     )
+    include_reasoning: bool = Field(
+        default=True,
+        description="If true, use the LLM to generate a short actionable interpretation "
+                    "of the DTS metrics (2-3 sentences). Adds ~1-2s latency.",
+    )
 
 
 # ── Per-token detail ──────────────────────────────────────────────────────────
@@ -111,6 +116,13 @@ class ScoreResponse(BaseModel):
     )
     all_tokens: List[TokenDetail] = Field(
         description="Details for ALL response tokens (shallow + deep), in order."
+    )
+
+    # ── LLM reasoning summary ─────────────────────────────────────────────────
+    reasoning_summary: Optional[str] = Field(
+        default=None,
+        description="LLM-generated actionable interpretation of the DTS metrics. "
+                    "Null when include_reasoning=false.",
     )
 
     # ── Run config ────────────────────────────────────────────────────────────

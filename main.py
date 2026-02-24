@@ -35,6 +35,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from dtr_analyzer import DTSConfig
 from model_loader import get_analyzer, get_model_info, load_model
+from reasoner import generate_reasoning
 from schemas import HealthResponse, ScoreRequest, ScoreResponse, TokenDetail
 
 logging.basicConfig(
@@ -198,7 +199,7 @@ def score(request: ScoreRequest) -> ScoreResponse:
 
     deep_tokens = [t for t in all_token_details if t.is_deep]
 
-    return ScoreResponse(
+    response = ScoreResponse(
         dts_score=round(analysis.dts, 4),
         category=_category(analysis.dts),
         generated_response=analysis.generated_text,
@@ -213,4 +214,15 @@ def score(request: ScoreRequest) -> ScoreResponse:
         deep_layer_threshold=deep_layer_threshold,
         settling_threshold=request.settling_threshold,
         depth_fraction=request.depth_fraction,
+        reasoning_summary=None,
     )
+
+    # ── Optional LLM reasoning summary ──────────────────────────────────────
+    if request.include_reasoning:
+        logger.info("Generating reasoning summary …")
+        response.reasoning_summary = generate_reasoning(
+            result=response,
+            prompt_preview=prompt_to_score,
+        )
+
+    return response
