@@ -10,6 +10,7 @@ Key metrics:
 - Distributional Distance: Jensen-Shannon divergence from final prediction
 """
 
+import gc
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -359,6 +360,12 @@ class DeepThinkingAnalyzer:
         generated_tokens = []
         token_metrics_list = []
 
+        _final_norm = (
+            getattr(getattr(self.model, 'model', None), 'norm', None)
+            or getattr(getattr(self.model, 'transformer', None), 'ln_f', None)
+            or getattr(getattr(self.model, 'model', None), 'final_layernorm', None)
+        )
+
         try:
             for gen_idx in range(max_new_tokens):
                 self.hook_manager.reset()
@@ -370,76 +377,71 @@ class DeepThinkingAnalyzer:
                         return_dict=True
                     )
 
-                logits = outputs.logits
-                final_logits = logits[0, -1, :]
+                # ── Extract only what we need, then immediately free the large tensors ──
+                final_logits = outputs.logits[0, -1, :].detach()
+                final_probs  = F.softmax(final_logits.float(), dim=-1).cpu().numpy()
 
-                hidden_states = outputs.hidden_states
+                # Pull last-position hidden vector from every layer (tiny: [d_model])
+                # and discard the full [1, seq_len, d_model] tensors right away.
+                last_hidden_per_layer = []
+                for hs in outputs.hidden_states[1:]:          # skip embedding layer (idx 0)
+                    last_hidden_per_layer.append(hs[0, -1, :].detach().clone())
+                del outputs  # free logits + all hidden state tensors from GPU
 
                 next_token_logits = final_logits / temperature
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token_id = torch.multinomial(probs, num_samples=1).item()
-
                 generated_tokens.append(next_token_id)
 
-                if len(hidden_states) > 1:
-                    distances = []
+                distances = []
+                for last_hidden in last_hidden_per_layer:
+                    try:
+                        h = last_hidden
+                        if _final_norm is not None:
+                            h = _final_norm(h.unsqueeze(0)).squeeze(0)
+                        if hasattr(self.model, 'lm_head'):
+                            layer_logits = self.model.lm_head(h)
+                            layer_probs = F.softmax(layer_logits.float(), dim=-1).detach().cpu().numpy()
+                        else:
+                            layer_probs = final_probs.copy()
+                        jsd = self._compute_jsd(final_probs, layer_probs)
+                        distances.append(jsd)
+                    except Exception:
+                        distances.append(0.0)
+                del last_hidden_per_layer
 
-                    final_probs = F.softmax(final_logits.float(), dim=-1).detach().cpu().numpy()
+                settling_depth = self._calculate_settling_depth(
+                    distances, self.config.settling_threshold
+                )
+                num_transformer_layers = len(distances)
+                deep_threshold = int(np.ceil(self.config.depth_fraction * num_transformer_layers))
+                is_deep_thinking = settling_depth >= deep_threshold
 
-                    _final_norm = (
-                        getattr(getattr(self.model, 'model', None), 'norm', None)
-                        or getattr(getattr(self.model, 'transformer', None), 'ln_f', None)
-                        or getattr(getattr(self.model, 'model', None), 'final_layernorm', None)
-                    )
-
-                    for layer_idx in range(1, len(hidden_states)):
-                        try:
-                            layer_hidden = hidden_states[layer_idx]
-                            last_hidden = layer_hidden[0, -1, :]  # keep model dtype
-
-                            if _final_norm is not None:
-                                last_hidden = _final_norm(last_hidden.unsqueeze(0)).squeeze(0)
-
-                            if hasattr(self.model, 'lm_head'):
-                                layer_logits = self.model.lm_head(last_hidden)
-                                layer_probs = F.softmax(layer_logits.float(), dim=-1).detach().cpu().numpy()
-                            else:
-                                layer_probs = final_probs.copy()
-
-                            jsd = self._compute_jsd(final_probs, layer_probs)
-                            distances.append(jsd)
-                        except:
-                            distances.append(0.0)
-
-                    settling_depth = self._calculate_settling_depth(
-                        distances,
-                        self.config.settling_threshold
-                    )
-
-                    num_transformer_layers = len(distances)
-                    deep_threshold = int(np.ceil(self.config.depth_fraction * num_transformer_layers))
-                    is_deep_thinking = settling_depth >= deep_threshold
-
-                    token_text = self.tokenizer.decode([next_token_id])
-
-                    metrics = TokenDTSMetrics(
-                        token_id=next_token_id,
-                        token_text=token_text,
-                        settling_depth=settling_depth,
-                        distances=distances,
-                        min_distances=self._compute_min_distances(distances),
-                        is_deep_thinking=is_deep_thinking,
-                        final_logits=final_probs
-                    )
-                    token_metrics_list.append(metrics)
+                metrics = TokenDTSMetrics(
+                    token_id=next_token_id,
+                    token_text=self.tokenizer.decode([next_token_id]),
+                    settling_depth=settling_depth,
+                    distances=distances,
+                    min_distances=self._compute_min_distances(distances),
+                    is_deep_thinking=is_deep_thinking,
+                    final_logits=final_probs,
+                )
+                token_metrics_list.append(metrics)
 
                 input_ids = torch.cat([
                     input_ids,
-                    torch.tensor([[next_token_id]], device=self.device)
+                    torch.tensor([[next_token_id]], device=input_ids.device)
                 ], dim=1)
+
+                # Periodic GPU cache flush to prevent fragmentation
+                if gen_idx % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         finally:
             self.hook_manager.remove_hooks()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
         generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 

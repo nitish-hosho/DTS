@@ -35,6 +35,14 @@ class ScoreRequest(BaseModel):
         description="Fraction of layers; tokens settling at or after this depth are "
                     "labelled deep-thinking (ρ).",
     )
+    max_prompt_tokens: int = Field(
+        default=512,
+        ge=64,
+        le=2048,
+        description="Truncate the prompt to this many tokens before scoring. "
+                    "Reduces GPU memory for long prompts (each token needs a full "
+                    "forward pass × 32 layers). Default 512 is safe for 16 GB VRAM.",
+    )
     include_jsd_trace: bool = Field(
         default=False,
         description="If true, include per-layer JSD distances for every token in the "

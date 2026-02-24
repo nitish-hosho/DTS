@@ -17,14 +17,21 @@ Run locally:
 Interactive docs:  http://localhost:8000/docs
 """
 
+import gc
 import logging
 import math
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import numpy as np
+import torch
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+# Load .env from the project root (same directory as this file)
+load_dotenv(Path(__file__).parent / ".env")
 
 from dtr_analyzer import DTSConfig
 from model_loader import get_analyzer, get_model_info, load_model
@@ -130,22 +137,42 @@ def score(request: ScoreRequest) -> ScoreResponse:
             device=original_config.device,
         )
 
+    # ── Truncate prompt to cap GPU memory usage ───────────────────────────────
+    # Memory per forward pass ≈ 33 layers × seq_len × 4096 × 2 bytes.
+    # At 512 tokens: ~138 MB/pass; at 2048 tokens: ~550 MB/pass × N generated tokens.
+    tokenizer = analyzer.tokenizer
+    enc = tokenizer(request.prompt, return_tensors="pt", add_special_tokens=True)
+    raw_len = enc["input_ids"].shape[1]
+    if raw_len > request.max_prompt_tokens:
+        truncated_ids = enc["input_ids"][0, -request.max_prompt_tokens :]  # keep tail (most recent context)
+        prompt_to_score = tokenizer.decode(truncated_ids, skip_special_tokens=False)
+        logger.info(
+            "Prompt truncated %d → %d tokens (max_prompt_tokens=%d)",
+            raw_len, request.max_prompt_tokens, request.max_prompt_tokens,
+        )
+    else:
+        prompt_to_score = request.prompt
+        logger.info("Prompt length: %d tokens", raw_len)
+
     try:
         logger.info(
             "Scoring prompt (%d chars), max_new_tokens=%d",
-            len(request.prompt),
+            len(prompt_to_score),
             request.max_new_tokens,
         )
         analysis = analyzer.analyze_prompt(
-            prompt=request.prompt,
+            prompt=prompt_to_score,
             max_new_tokens=request.max_new_tokens,
         )
     except Exception as exc:
         logger.exception("Error during DTS analysis")
         raise HTTPException(status_code=500, detail=f"DTS analysis failed: {exc}") from exc
     finally:
-        # Restore original config
+        # Restore original config and clean up GPU memory
         analyzer.config = original_config
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
     model_name, _, num_layers = get_model_info()
     deep_layer_threshold = math.ceil(request.depth_fraction * num_layers)
